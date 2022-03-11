@@ -1,0 +1,384 @@
+---
+title: "Nanostring Panel CD34 Flow Sorted Cells"
+author: "Jenny Smith"
+date: "7/6/2017"
+output: html_document
+---
+
+Purpose: To explore the normalized and raw Nanostring Data. 
+
+```{r setup}
+library(knitr)
+knitr::opts_chunk$set(tidy.opts=list(width.cutoff=50),tidy=TRUE, fig.align='center', fig.height = 4, fig.width = 6)
+knitr::opts_knit$set(root.dir = "/Volumes/jlsmith3/Nanostring_Analysis/2017.07.6_CD34FlowSorted/")
+```
+
+
+```{r message = FALSE, warning=FALSE}
+library(survival)
+library(RColorBrewer)
+library(colorspace)
+library(stringr)
+library(GEOquery)
+library(Biobase)
+library(dplyr)
+library(ggplot2)
+library(GGally)
+library(gridExtra)
+library(grid)
+library(magrittr)
+getwd()
+```
+
+
+```{r}
+source("/Volumes/jlsmith3/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Expression_Distribution_Plots_Function.r")
+source("/Volumes/jlsmith3/scripts/RNAseq_Analysis/MSLN_waterfallplots/Waterfall_Barplot_Function_2017.05.22.r")
+source("/Volumes/jlsmith3/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/merge_clinData_ExpnData_Functions.r")
+source("/Volumes/jlsmith3/scripts/nanostring_analysis/clusterAnalysis_Function copy.r")
+source("/Volumes/jlsmith3/scripts/RNAseq_Analysis/DifferentialExpn_PathwayAnalysis/Heatmaps_Function.r")
+
+```
+
+
+#Define Functions to be used
+```{r}
+PatientDist <- function(df, dfName){
+  colors = rainbow_hcl(24)
+  par(pty="m", las=2, mar=c(5,4,5,2))
+  boxplot(df, col=colors,cex.axis=0.85,outline=FALSE, ylim=c(0,20))
+  
+  title <- paste("Distribution of Gene Expression for TARGET AML \n ", dfName, sep = " ")
+  title(main = title, line = 2.5, cex.main = 1.5, ylab = "Log2 Counts", xlab="", cex.lab=1.5)
+}
+```
+
+```{r}
+reformat.NSolver <- function(csv,annotations){
+  #Format the dataframes for patient IDs as USIs and genes as rownames
+  #csv is the output from NSolver Export with columns [1] "Gene.Name" "Annotation"                                    
+ # [3] "Accession.."                                        "Class.Name"                                        
+ # [5] "Positive.Flag"                                      "Avg.Count"                                         
+ # [7] "Min.Count"                                          "Max.Count"                                         
+ # [9] "X.CV" 
+
+  
+  N <- ncol(csv)
+  #filenames become modified when read into R. Must convert special characters to "."
+  reg <- gsub(".+_([0-9]{6}|BM[0-9]{4}).+", "\\1", colnames(csv))
+  
+  #subset the annotations file. Must be in the same order as the exported csv file
+  annotations <- annotations[which(annotations$Reg. %in% reg), ]
+  phenoVector <- as.character(csv[1,10:N])
+  
+  #unique gene names set as rownames
+  genes <-csv[,1] %>% grep("\\w", . ,value=TRUE) 
+
+  cts <- csv[-(1:2), -(1:9)] #remove two rows, and summary stat columns
+  #convert columns to numeric class
+  cts <- sapply(cts, function(x) as.numeric(as.character(x)))
+  #set rownames as genes
+  rownames(cts) <- genes
+
+  # #only endogenous genes to be investigated
+  # # input[[i]] <- input[[i]][which(input[[i]]$Class.Name == "Endogenous"), ]
+  # # input[[i]] <- input[[i]][,-(1:9)] #remove the first 9 columns
+ 
+  #set column names as patient USIs
+  colnames(cts) <- annotations$USI #colnames are in same  order as annotation file.
+  cts <- fixDupIDs(cts, type="colnames")
+  names(phenoVector) <- colnames(cts)#colnames are in same  order as annotation file.
+  
+  list <- list(cts, phenoVector)
+  names(list) <- c("counts", "phenovector")
+  return(list)
+}
+
+```
+
+
+#Read in the annotation files
+
+```{r}
+anno <- read.csv("/Volumes/jlsmith3/Nanostring_Analysis/2017.05.04_DataExploration/NanostringAnnotations_04May2017.csv", stringsAsFactors = FALSE)
+anno <- fixDupIDs(anno, IDs="USI", type="rownames")
+
+head(anno)
+```
+
+```{r}
+clinData <- read.csv("/Volumes/jlsmith3/reference_mapping-files/TARGET_AML_current_asof_june30_2016_UPDATED_RhondaEdit_2017.06.08.csv", stringsAsFactors = FALSE, row.names = 1)
+
+head(clinData)
+```
+
+
+#Read in the normalized count data from nanostring
+
+```{r}
+geomean.cd34 <- read.csv("TARGET_AML_NanostringPanel_CD34FlowSorted_geoMeanNorm_Counts.csv", stringsAsFactors = FALSE)
+dim(geomean.cd34)
+```
+
+```{r}
+head(geomean.cd34[,1:15])
+```
+
+
+```{r}
+cd34.BM <- read.csv("TARGET_AML_NanostringPanel_CD34FlowSorted_BM_geoMeanNorm_Counts.csv", stringsAsFactors = FALSE)
+dim(cd34.BM)
+```
+
+```{r}
+head(cd34.BM)
+```
+
+
+#Reformat the Normalized counts
+```{r}
+cd34.cts <- reformat.NSolver(geomean.cd34,anno)
+# cd34.cts$phenovector
+
+head(cd34.cts$counts)
+# save(counts,file= "TARGET_AML_NanostringCounts_CD34.RData")
+# save(phenoVector, file="TARGET_AML_phenovectors_CD34.RData")
+```
+
+```{r}
+cd34.BM.cts <- reformat.NSolver(cd34.BM, anno)
+# cd34.BM.cts$phenovector
+
+head(cd34.BM.cts$counts[,1:7]) #258 (234 endogenous)
+```
+
+#Merge with Clinical Data
+
+```{r}
+USI <- grep("\\.1|^BM", colnames(cd34.BM.cts$counts), invert=TRUE, value = TRUE)
+cd34.dx <- t(cd34.BM.cts$counts[, USI])
+cd34.eoi <- t(cd34.BM.cts$counts[,paste0(USI, ".1")])
+cd34.both <- rbind(cd34.dx, cd34.eoi)
+
+clinData <- merge(clinData,cd34.dx, by.x=)
+
+```
+
+
+
+#MDS
+
+```{r message=FALSE,warning=FALSE}
+#Housekeeping genes
+HK <- geomean.cd34[which(geomean.cd34$Class.Name == "Housekeeping"), "Gene.Name"]
+
+#Select only endogenous genes
+genes <- grep("POS_|NEG_", rownames(cd34.cts$counts), invert = TRUE, value = TRUE) %>% setdiff(., HK)
+
+#Use only endogenous genes in MDS
+MDS <- plotPCoA(expnData = cd34.cts$counts, clinData = anno, geneList = genes,factor = "Group_Condition")
+```
+
+
+```{r}
+MDS$plot$labels$colour <- "Group"
+MDS$plot$labels$title <- "Nonmetric Multidimensional Scaling: \n Flow Sorted Cells"
+
+# pdf(file="MDSplot.pdf")
+MDS$plot + theme(text = element_text(size = 16)) + geom_point(aes(color=MDS$MDS_df$Group_Condition), size=5)
+# dev.off()
+```
+
+```{r}
+library(corrplot)
+cor.matrix <- cor(MDS$MDS_df[,10:ncol(MDS$MDS_df)])
+
+corrplot(cor.matrix, order = "FPC", method = "shade", tl.cex = 0.4,
+tl.col = "black", cl.cex = 0.75, cl.pos = "b", mar = c(0,
+0, 1, 0), main = "Correlation Plot for Gene Expression Levels")
+```
+
+They are all highly correlated because we picked the highest expressed genes. 
+
+
+
+#Boxplots of Pateints Expression
+
+```{r}
+log2 <- log2(cd34.BM.cts$counts + 1 )
+```
+
+```{r fig.height=7, fig.width=13}
+# pdf(file="DistributionOfGeneExpression_boxplotsPerPatient.pdf")
+PatientDist(log2, "CD34 Flow Sorted Cells")
+# dev.off()
+```
+
+
+#Distribtion by Group
+
+```{r message=FALSE, warning=FALSE}
+pdf(file="boxplots_densityplots_nanostring_geneExpression.pdf")
+expnDist(expnMatrix = cd34.BM.cts$counts,phenoVector = cd34.BM.cts$phenovector, 
+                                geneList = genes, unit = "Norm.Count",logCPM=FALSE,plot=TRUE)
+dev.off()
+```
+
+```{r}
+DistByGroup <- expnDist(expnMatrix = cd34.BM.cts$counts,phenoVector = cd34.BM.cts$phenovector, 
+                                geneList = rownames(cd34.BM.cts$counts), unit = "Norm.Count",logCPM=NULL,plot=FALSE)
+
+head(DistByGroup[,c("PRAME", "WT1", "MSLN", "Status")])
+# tail(DistByGroup[,c("PRAME", "WT1", "MSLN", "Status")])
+```
+
+```{r}
+dim(DistByGroup)
+```
+
+```{r}
+# save(DistByGroup, file="CountsList_with_CD34_BM_GenesasColumns_withGroups.RData")
+
+# write.csv(DistByGroup, file="TARGET_AML_NanostringPanel_GeomeanNormalizedCounts_CD34_BMGenesasColumns_withControls.csv")
+```
+
+
+#Mean Gene Expression with Normalized Counts - linear Scale (NOT log2)
+
+```{r message=FALSE,wanring=FALSE}
+library(psych)
+
+descStats <- describeBy(DistByGroup,group=DistByGroup$Status, digits = 3)
+
+names(descStats)
+```
+
+```{r}
+groups <- unique(cd34.BM.cts$phenovector) %>% .[order(.)]
+
+cols <- NULL
+for (i in 1:3){
+  cnames <- paste(colnames(descStats[[i]][,c(2:5,8:9)]), groups[i], sep="_")
+  cols <- c(cols,cnames)
+}
+
+cols <- c("Genes", cols)
+```
+
+```{r}
+stats <- cbind(descStats$BM[,c(2:5,8:9)], descStats$CD34[,c(2:5,8:9)])
+stats <- cbind(stats, descStats$OtherCells[,c(2:5,8:9)])
+
+stats <- cbind(rownames(stats),stats)
+names(stats) <- cols
+
+head(stats)
+# save(stats, file="SummaryStatisticsByGroup_perGene.RData")
+```
+
+```{r}
+# head(counts$geomean)
+merged <- transform(merge(stats,cd34.BM.cts$counts, by.x=0, by.y=0), row.names=Row.names, Row.names=NULL)
+head(merged)
+
+# save(merged, file="SummaryStats_geomean_normalized_counts_withControls.RData")
+# write.csv(merged, file="TARGET_AML_NanostringPanel_CD34_BM_SummaryStats_and_geomeanNormalizedCounts_withControls.csv",row.names = FALSE)
+```
+
+
+#Waterfall Plots Colored by Group
+
+```{r}
+path <- paste(getwd(), "distributionPlots/", sep="/")
+plots <- list()
+for (i in 1:234){
+  gene <- genes[i]
+  title <- paste("Expression of", gene, sep=" ")
+  p <- waterfallPlot(expnMatrix = cd34.BM.cts$counts, 
+                     geneName = gene, 
+                     phenoVector = cd34.BM.cts$phenovector, 
+                     unit="Norm.Count") + labs(title=title)
+  
+  fileName <- paste(path,title,".pdf", sep="")
+  # pdf(file=fileName)
+  print(p)
+  # dev.off()
+}
+
+```
+
+#Heatmaps 
+
+```{r message=FALSE,warning=FALSE,fig.width=10, fig.height=11}
+colors <- ifelse(grepl("BM", cd34.BM.cts$phenovector), "black", cd34.BM.cts$phenovector) %>% gsub("CD34", "dodgerblue4", .) %>% gsub("OtherCells", "dodgerblue2", .)
+
+png(file="TARGET_AML_NanostringPanel_CD34_BM_heatmap.png")
+dends <- dendrograms(cd34.BM.cts$counts, cd34.BM.cts$phenovector, genes,method="ward.D2")
+basicHeatmap(dends$expnData,dends$c2, dends$c1,colors = colors, main="CD34 Flow Sorted Cells" )
+dev.off()
+```
+
+
+#DEGs Barplots 
+
+the sample with low counts across the board was removed. PARTVG
+```{r}
+CD34vsOtherAML <- read.csv("CD34_vs_OtherCells_RemoveLowCounts/R_FILES/results/DE/DE results - GroupCD34.csv", row.names = 1)
+CD34vsOtherAML$gene <- gsub("-mRNA", "", rownames(CD34vsOtherAML))
+
+head(CD34vsOtherAML)
+
+```
+
+```{r}
+theme_JS %<a-% { theme(plot.title = element_text(hjust = 0.5, size = 18),
+          panel.background = element_rect(fill="white"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_rect(color = "black", fill=NA),
+          axis.text = element_text(color = "black"),
+          axis.text.x = element_text(angle = 45,hjust=1,vjust = 1, size = 8),
+          axis.text.y = element_text(size = 14),
+          axis.title = element_text(size = 14),
+          legend.position = "none")
+}
+```
+
+```{r}
+barplot <- function(HighFC, decile=NULL) {
+  dec <- quantile(HighFC$Log2.fold.change, probs = seq(0,1,length= 11), type=5)
+  if (is.null(decile)){
+    HighFC <- HighFC
+  }else{
+    decile.90 <- dec[10]
+    decile.10 <- dec[2]
+    HighFC <- HighFC[which(HighFC$Log2.fold.change >= decile.90 | HighFC$Log2.fold.change <= decile.10), ]
+  }
+  HighFC$cut <- ifelse(HighFC$Log2.fold.change > 0, "up", "dn")
+  
+  ggplot(HighFC, aes(x=reorder(HighFC$gene, HighFC$Log2.fold.change), y=Log2.fold.change, fill=cut)) + 
+    geom_bar(stat = "identity") + theme_JS + labs(title="Differentially Regulated Genes: Largest FC",x="") +
+    scale_fill_manual(values = c(up="red", dn="darkgreen"))
+}
+```
+
+```{r}
+barplot(CD34vsOtherAML, decile = TRUE)
+```
+
+
+```{r}
+CD34vsBM <- read.csv("CD34_vs_BM_AA_RemoveLowCounts2017-07-11 13-11/results/DE/DE results - GroupCD34.csv", row.names = 1, stringsAsFactors = FALSE)
+CD34vsBM$gene <- gsub("-mRNA", "", rownames(CD34vsBM))
+
+head(CD34vsBM)
+```
+
+
+```{r}
+CD34vsBM <- subset(CD34vsBM, BY.p.value <= 0.05) #only 44 significant genes, so plot all. 
+barplot(CD34vsBM)
+```
+
+
+
